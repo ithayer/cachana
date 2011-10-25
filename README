@@ -1,0 +1,1 @@
+Cachana makes it easy to memoize function calls in clojure to memcache.
