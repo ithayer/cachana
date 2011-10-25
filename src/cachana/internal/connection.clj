@@ -10,15 +10,16 @@
             PlainCallbackHandler]
            [java.net InetSocketAddress]))
 
-(def mcd (atom nil))
+(def client (atom nil))
 
-(defn- key->str [key]
-  (if (keyword? key) (name key) key))
-
-(defn- make-connection-factory [user password]
-  (let [ad (AuthDescriptor. (into-array ["PLAIN"]) (PlainCallbackHandler. user password))]
-    (.. (ConnectionFactoryBuilder.) (setProtocol ConnectionFactoryBuilder$Protocol/BINARY)
-      (setAuthDescriptor ad) build)))
+(defn- build
+  "Use the PLAIN auth descriptor and build the connection factory."
+  [user password]
+  (let [auth (AuthDescriptor. (into-array ["PLAIN"]) (PlainCallbackHandler. user password))]
+    (.. (ConnectionFactoryBuilder.)
+        (setProtocol ConnectionFactoryBuilder$Protocol/BINARY)
+        (setAuthDescriptor auth)
+        build)))
 
 (defn memcached! [& {:keys [host port user password] :or {host "localhost", port 11211, user "", password ""}}]
   (reset! mcd (if (and (str/blank? user) (str/blank? password))
