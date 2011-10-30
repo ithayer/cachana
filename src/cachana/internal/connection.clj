@@ -1,6 +1,5 @@
 (ns cachana.internal.connection
-  (:require [clojure.contrib.accumulators :as acc]
-            [clojure.string :as str])
+  (:require [clojure.string :as str])
   (:import [net.spy.memcached
             MemcachedClient
             ConnectionFactoryBuilder
@@ -28,8 +27,8 @@
         (setAuthDescriptor auth)
         build)))
 
-(defn- initialize-client!
-  [& {:keys [host port user password] :as options}]
+(defn initialize-network!
+  [{:keys [host port user password] :as options}]
   (let [host (or host "localhost")
         port (if (not (nil? port)) (Integer. port) 11211)]
     (reset! client (if (and (nil? user) (nil? password))
@@ -38,68 +37,78 @@
                       (create-factory user password)
                       (AddrUtil/getAddresses (str host ":" port)))))))
 
-(defn cache-set! [key value & {:keys [expiration] :or {expiration 3600}}]
-  (.set @client (name key) expiration value))
+;; TODO: rename
+(defn cache-set! [key value {:keys [expiration] :or {expiration 900}}]
+  (.. @client (set (name key) expiration value)))
 
 (defn cache-get [key & {:keys [default] :or {default nil}}]
   (if-let [res (.. @client (get (name key)))] res default))
 
-(defn inc-stat [& ks]
-  (swap! stats update-in ks (fn [x] (inc (or x 0)))))
+(defn cache-delete [key]
+  (.. @client (delete key)))
 
-(defn try-local [joined-key]
-  (when *thread-local-cache*
-    (get @*thread-local-cache* joined-key)))
+(defn test-network [n]
+  (let [write-start (System/currentTimeMillis)]
+    (dotimes [i n]
+      (cache-set! (str "benchmark-" i) i {:expiration 60}))
+    (println n "writes took" (- (System/currentTimeMillis) write-start) "ms")
+    (let [read-start (System/currentTimeMillis)]
+      (dotimes [i n]
+        (cache-get (str "benchmark-" i)))
+      (println n "reads took" (- (System/currentTimeMillis) read-start) "ms"))))
 
-(defn set-local! [joined-key val]
+(defn inc-stat [ks & [val]]
+  (when-not (and (= :local (last ks))
+                 (not *thread-local-cache*))
+    (swap! stats update-in ks (fn [x] (inc (or x 0)))))
+  val)
+
+(defn set-local! [location val]
   (when *thread-local-cache*
-    (swap! *thread-local-cache* assoc-in [joined-key] val))
+    (swap! *thread-local-cache* assoc-in [location] val))
   val)
 
 (defmacro with-local-cache [& body]
   `(binding [*thread-local-cache* (atom {})]
      ~@body))
 
-(defmacro with-caching* [call-options [bucket key] body]
-  (let [[pack-fn unpack-fn] (get @options :serialization)]
-    `(let [key# (str ~(name bucket) ~(get @options :bucket-separator) ~key)
-           in-local-cache?# (~try-local key#)]
-       (if in-local-cache?#
-         (do (~inc-stat ~bucket :hit :local)
-             in-local-cache?#)
-         (do (and *thread-local-cache* (~inc-stat ~bucket :miss :local))
-             (if-let [in-network-cache?# (and (not (:local-only ~call-options))
-                                              (~cache-get key#))]
-               (do (~inc-stat ~bucket :hit :network)
-                   (set-local! key# (~unpack-fn in-network-cache?#)))
-               (do (and (not (:local-only ~call-options))
-                        (~inc-stat ~bucket :miss :network))
-                   (let [result# ~@body]
-                     (and (not (:local-only ~call-options))
-                          (~cache-set! key# (~pack-fn result#)))
-                     (~set-local! key# result#)
-                     result#))))))))
+(defn ->string [[bucket key]]
+  (str (name bucket) (get @options :bucket-separator) key))
 
-(defmacro with-caching
-  "Accepts <options map, key sequence, body>, or <key sequence, body>."
-  [selector & remaining]
-  (if (map? selector)
-    `(with-caching* ~selector ~(first remaining) ~(rest remaining))
-    `(with-caching* {} ~selector ~remaining)))
+(defmacro try-local [location & on-miss]
+  `(let [location-string# (->string ~location)]
+     (if *thread-local-cache*
+       (if-let [result# (get @*thread-local-cache* location-string#)]
+         (inc-stat (cons (first ~location) [:hit :local]) result#)
+         (set-local! location-string#
+                     (inc-stat (cons (first ~location) [:miss :local]) (do ~@on-miss))))
+       (do ~@on-miss))))
 
+(defmacro try-network [location & on-miss]
+  `(let [location-string# (->string ~location)
+         [pack-fn# unpack-fn#] (get ~(deref options) :serialization)]
+     (if-let [cache-result# (cache-get location-string#)]
+       (inc-stat (cons (first ~location) [:hit :network]) cache-result#)
+       (let [result# (inc-stat (cons (first ~location) [:miss :network]) (do ~@on-miss))]
+         (cache-set! location-string# result#)
+         result#))))
 
-(def n 10000000)
+(defn memoize
+  ([wrapped]
+     (memoize {} wrapped))
+  ([call-options wrapped]
+       (fn [& args]
+         (let [location (or (:location call-options) [(str wrapped) args])]
+           (try-local location (if (= :network (:mode call-options))
+                                 (try-network location (apply wrapped args))
+                                 (apply wrapped args))))))))
 
-(with-caching [:bigrange n] (reduce + (range 0 n)))
+(defn my-inc [x]
+  (println "work done on: " x)
+  (inc x))
 
-(with-local-cache
-  (with-caching {:local-only true} [:bigrange n] (reduce + (range 0 n)))
-  (with-caching {:local-only true} [:bigrange n] (reduce + (range 0 n)))) ;; Local cache hit.
+((memoize {} my-inc) 2)
 
-(with-local-cache
-  (with-caching [:accounts n] (reduce + (range 0 n)))
-  (with-caching [:accounts n] (reduce + (range 0 n))))
-  
-(with-caching [:accounts n] (reduce + (range 0 n)))
+((memoize {:mode :network} my-inc) 2)
+((memoize {:mode :network} my-inc) 2) ;; cached
 
-         
