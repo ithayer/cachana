@@ -1,1 +1,35 @@
-Cachana makes it easy to memoize function calls in clojure to memcache.
+Cachana makes it easy to memoize function calls in clojure to a thread-local cache or to a network-based cache (eg: memcache).
+
+
+Examples:
+
+  (defn my-inc [x]
+    (println "Work done on: " x)
+    (inc x))
+
+  ;; thread-local 
+
+  (with-local-cache
+    ((memoize my-inc) 2)
+    ((memoize my-inc) 2)) ;; cached
+  
+  ;; network-only 
+
+  ((memoize {:mode :network} my-inc) 2)
+  ((memoize {:mode :network} my-inc) 2) ;; cached
+
+  ;; both
+
+  (with-local-cache
+    ((memoize {:mode :network} my-inc) 2)
+    ((memoize {:mode :network} my-inc) 2)) ;; retrieved from local
+
+  (with-local-cache
+    ((memoize {:mode :network} my-inc) 2)  ;; retrieved from network
+    ((memoize {:mode :network} my-inc) 2)) ;; retrieved from local
+
+  ;; Specify cache bucket location.
+
+  (with-local-cache
+    ((memoize {:location [:cookies "two"]} my-inc) 2)
+    ((memoize {:location [:cookies "two"]} my-inc) 2))
